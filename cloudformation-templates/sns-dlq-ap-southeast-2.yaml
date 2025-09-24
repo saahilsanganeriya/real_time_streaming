@@ -1,0 +1,176 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'SNS DLQ resources for ShiftOpportunity error handling - Deploy in ap-southeast-2'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'hda-gamma'
+    AllowedValues: ['dev', 'staging', 'prod', 'hda-gamma']
+    Description: 'Environment name'
+  
+  LambdaFunctionName:
+    Type: String
+    Default: 'ShiftOpportunityServiceEvents-sns-to-kinesis'
+    Description: 'Name of the Lambda function (for naming consistency)'
+  
+  NotificationEmail:
+    Type: String
+    Description: 'Email address for SNS DLQ alerts and notifications'
+    Default: 'alerts@example.com'
+  
+  SNSTopicArn:
+    Type: String
+    Description: 'ARN of the SNS topic (should be in same region as this stack)'
+  
+  LambdaFunctionArn:
+    Type: String
+    Description: 'ARN of the Lambda function endpoint (can be cross-region)'
+    Default: ''
+
+Conditions:
+  HasLambdaFunction: !Not [!Equals [!Ref LambdaFunctionArn, '']]
+
+Resources:
+
+  # ================================================================================
+  # SNS Subscription Dead Letter Queue (ap-southeast-2)
+  # ================================================================================
+  
+  SNSSubscriptionDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${LambdaFunctionName}-sns-subscription-dlq-${Environment}'
+      MessageRetentionPeriod: 1209600  # 14 days
+      VisibilityTimeout: 300
+      ReceiveMessageWaitTimeSeconds: 20  # Long polling
+      KmsMasterKeyId: alias/aws/sqs  # Server-side encryption
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: 'SNSSubscriptionDLQ'
+        - Key: Service
+          Value: 'ShiftOpportunity'
+        - Key: Region
+          Value: 'ap-southeast-2'
+
+  # ================================================================================
+  # SNS Subscription (must be in same region as SNS topic)
+  # ================================================================================
+  
+  # SNS Subscription with cross-region Lambda endpoint
+  SNSSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasLambdaFunction
+    Properties:
+      Protocol: lambda
+      TopicArn: !Ref SNSTopicArn
+      Endpoint: !Ref LambdaFunctionArn
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt SNSSubscriptionDLQ.Arn
+
+  # ================================================================================
+  # CloudWatch Resources for Monitoring SNS DLQ
+  # ================================================================================
+  
+  # CloudWatch Alarm for SNS DLQ Messages
+  SNSDLQMessagesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${LambdaFunctionName}-SNS-DLQ-Messages-${Environment}'
+      AlarmDescription: 'Alert when messages accumulate in SNS subscription DLQ'
+      MetricName: ApproximateNumberOfVisibleMessages
+      Namespace: AWS/SQS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt SNSSubscriptionDLQ.QueueName
+      TreatMissingData: notBreaching
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: 'ShiftOpportunity'
+
+  # SNS Topic for Cross-Region Alerts (optional)
+  SNSAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${LambdaFunctionName}-sns-dlq-alerts-${Environment}'
+      DisplayName: 'ShiftOpportunity SNS DLQ Alerts (ap-southeast-2)'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: 'ShiftOpportunity'
+        - Key: Region
+          Value: 'ap-southeast-2'
+
+  # Alarm notification subscription
+  SNSAlertSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      TopicArn: !Ref SNSAlertTopic
+      Endpoint: !Ref NotificationEmail
+
+  # Connect alarm to SNS topic
+  SNSDLQAlarmNotification:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${LambdaFunctionName}-SNS-DLQ-Messages-Notification-${Environment}'
+      AlarmDescription: 'Notification alarm for SNS subscription DLQ messages'
+      MetricName: ApproximateNumberOfVisibleMessages
+      Namespace: AWS/SQS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt SNSSubscriptionDLQ.QueueName
+      AlarmActions:
+        - !Ref SNSAlertTopic
+      TreatMissingData: notBreaching
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: 'ShiftOpportunity'
+
+Outputs:
+  SNSSubscriptionDLQArn:
+    Description: 'ARN of the SNS subscription DLQ in ap-southeast-2'
+    Value: !GetAtt SNSSubscriptionDLQ.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-SNSSubscriptionDLQ-ARN'
+
+  SNSSubscriptionDLQUrl:
+    Description: 'URL of the SNS subscription DLQ in ap-southeast-2'
+    Value: !Ref SNSSubscriptionDLQ
+    Export:
+      Name: !Sub '${AWS::StackName}-SNSSubscriptionDLQ-URL'
+
+  SNSAlertTopicArn:
+    Description: 'ARN of the SNS alert topic in ap-southeast-2'
+    Value: !Ref SNSAlertTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-SNSAlertTopic-ARN'
+
+  Region:
+    Description: 'Region where this stack is deployed'
+    Value: !Ref 'AWS::Region'
+    Export:
+      Name: !Sub '${AWS::StackName}-Region'
+
+  SNSSubscriptionArn:
+    Condition: HasLambdaFunction
+    Description: 'ARN of the SNS subscription'
+    Value: !Ref SNSSubscription
+    Export:
+      Name: !Sub '${AWS::StackName}-SNSSubscription-ARN' 

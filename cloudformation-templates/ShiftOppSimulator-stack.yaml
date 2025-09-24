@@ -1,0 +1,166 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Data Simulator for Shift Opportunity Pipeline Testing'
+
+Parameters:
+  TargetLambdaFunctionName:
+    Type: String
+    Description: Name of the target Lambda function to invoke (your existing lambda_function.py)
+    Default: ShiftOpportunityServiceEvents-sns-to-kinesis
+  
+  SNSTopicArn:
+    Type: String
+    Description: ARN of the SNS topic for shift opportunity events
+    Default: arn:<partition>:sns:ap-southeast-2:123456789012:ShiftOpportunityServiceEvents
+  
+  SimulationInterval:
+    Type: Number
+    Description: Interval in minutes between simulated events
+    Default: 1
+    MinValue: 1
+    MaxValue: 60
+
+Conditions:
+  IsSingular: !Equals [!Ref SimulationInterval, 1]
+
+Resources:
+  # DynamoDB table for tracking opportunity states
+  SimulatorStateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-SimulatorState'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: opportunityId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: opportunityId
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Purpose
+          Value: ShiftOpportunitySimulator
+
+  # IAM role for the simulator Lambda
+  SimulatorLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: SimulatorPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:Scan
+                  - dynamodb:UpdateItem
+                  - dynamodb:DescribeTable
+                  - dynamodb:DeleteItem
+                Resource: !GetAtt SimulatorStateTable.Arn
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${TargetLambdaFunctionName}'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  # Lambda function for data simulation
+  SimulatorLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-DataSimulator'
+      Runtime: python3.13
+      Handler: data_simulator.lambda_handler
+      Role: !GetAtt SimulatorLambdaRole.Arn
+      Code:
+        ZipFile: |
+          # Placeholder code - replace with actual data_simulator.py content
+          import json
+          import logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          
+          def lambda_handler(event, context):
+              logger.info("Simulator function needs to be updated with actual code")
+              return {"statusCode": 200, "body": "Placeholder function"}
+      Environment:
+        Variables:
+          TARGET_LAMBDA_FUNCTION: !Ref TargetLambdaFunctionName
+          STATE_TABLE: !Ref SimulatorStateTable
+          SNS_TOPIC_ARN: !Ref SNSTopicArn
+          SIMULATOR_REGION: !Ref AWS::Region
+      Timeout: 60
+      Tags:
+        - Key: Purpose
+          Value: ShiftOpportunitySimulator
+
+  # EventBridge rule to trigger the simulator every N minutes
+  SimulatorScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${AWS::StackName}-SimulatorSchedule'
+      Description: Trigger data simulator every N minutes
+      ScheduleExpression: !Sub 
+        - 'rate(${SimulationInterval} ${Unit})'
+        - Unit: !If [IsSingular, 'minute', 'minutes']
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt SimulatorLambdaFunction.Arn
+          Id: SimulatorTarget
+
+  # Permission for EventBridge to invoke the Lambda
+  SimulatorLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SimulatorLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt SimulatorScheduleRule.Arn
+
+  # CloudWatch Log Group for the simulator
+  SimulatorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${SimulatorLambdaFunction}'
+      RetentionInDays: 7
+
+Outputs:
+  SimulatorFunctionName:
+    Description: Name of the data simulator Lambda function
+    Value: !Ref SimulatorLambdaFunction
+    Export:
+      Name: !Sub '${AWS::StackName}-SimulatorFunctionName'
+  
+  SimulatorStateTableName:
+    Description: Name of the DynamoDB table for simulator state
+    Value: !Ref SimulatorStateTable
+    Export:
+      Name: !Sub '${AWS::StackName}-SimulatorStateTable'
+  
+  ScheduleRuleName:
+    Description: Name of the EventBridge rule for scheduling
+    Value: !Ref SimulatorScheduleRule
+    Export:
+      Name: !Sub '${AWS::StackName}-ScheduleRule'
+  
+  SimulatorRoleArn:
+    Description: ARN of the IAM role for the simulator
+    Value: !GetAtt SimulatorLambdaRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-SimulatorRole' 

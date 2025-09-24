@@ -1,0 +1,546 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Unified ShiftOpportunity Real-Time Streaming Platform - Simplified Error Handling'
+
+# ================================================================================
+# Template Parameters
+# ================================================================================
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'hda-gamma'
+    AllowedValues: ['dev', 'staging', 'prod', 'hda-gamma']
+    Description: 'Environment name'
+  
+  LambdaFunctionName:
+    Type: String
+    Default: 'ShiftOpportunityServiceEvents-sns-to-kinesis'
+    Description: 'Name of the unified Lambda function'
+  
+  KinesisStreamName:
+    Type: String
+    Default: 'ShiftOpportunityServiceEvents'
+    Description: 'Name of the target Kinesis stream'
+  
+  SNSTopicArn:
+    Type: String
+    Description: 'ARN of the SNS topic that triggers the Lambda (cross-region supported)'
+  
+  NotificationEmail:
+    Type: String
+    Description: 'Email address for alerts and notifications'
+    Default: 'alerts@example.com'
+  
+  S3Bucket:
+    Type: String
+    Description: 'S3 bucket for historical data replay'
+    Default: 'shift-opportunity-service-events'
+
+# ================================================================================
+# CloudFormation Resources
+# ================================================================================
+
+Resources:
+
+  # ================================================================================
+  # Unified Dead Letter Queue Infrastructure
+  # ================================================================================
+  
+  # Single Unified DLQ for all errors
+  UnifiedDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'ShiftOpportunity-UnifiedDLQ-${Environment}'
+      MessageRetentionPeriod: 1209600  # 14 days
+      VisibilityTimeout: 5400  # 90 minutes (6x Lambda timeout of 15 min)
+      ReceiveMessageWaitTimeSeconds: 20  # Long polling
+      KmsMasterKeyId: alias/aws/sqs
+      # Redrive policy for poison queue
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt PoisonQueue.Arn
+        maxReceiveCount: 3  # After 3 failed processing attempts, move to poison
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: 'UnifiedDLQ'
+        - Key: Service
+          Value: 'ShiftOpportunity'
+        - Key: ErrorHandling
+          Value: 'Simplified'
+
+  # Poison Queue for permanently failed messages
+  PoisonQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'ShiftOpportunity-PoisonQueue-${Environment}'
+      MessageRetentionPeriod: 1209600  # 14 days
+      KmsMasterKeyId: alias/aws/sqs
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: 'PoisonQueue'
+        - Key: Service
+          Value: 'ShiftOpportunity'
+
+  # DLQ Policy for unified access
+  UnifiedDLQPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref UnifiedDLQ
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action:
+              - 'sqs:SendMessage'
+              - 'sqs:ReceiveMessage'
+              - 'sqs:DeleteMessage'
+              - 'sqs:GetQueueAttributes'
+              - 'sqs:ChangeMessageVisibility'
+            Resource: !GetAtt UnifiedDLQ.Arn
+
+  # ================================================================================
+  # Unified Lambda Function
+  # ================================================================================
+  
+  # Enhanced IAM Role for the unified Lambda
+  UnifiedLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'ShiftOpportunity-UnifiedLambda-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        # Kinesis Access
+        - PolicyName: KinesisAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'kinesis:PutRecord'
+                  - 'kinesis:PutRecords'
+                  - 'kinesis:DescribeStream'
+                  - 'kinesis:ListStreams'
+                Resource: !Sub 'arn:${AWS::Partition}:kinesis:${AWS::Region}:${AWS::AccountId}:stream/${KinesisStreamName}'
+        
+        # Unified DLQ Access
+        - PolicyName: UnifiedDLQAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'sqs:SendMessage'
+                  - 'sqs:ReceiveMessage'
+                  - 'sqs:DeleteMessage'
+                  - 'sqs:GetQueueAttributes'
+                  - 'sqs:ChangeMessageVisibility'
+                Resource: 
+                  - !GetAtt UnifiedDLQ.Arn
+                  - !GetAtt PoisonQueue.Arn
+        
+        # S3 Access for historical replay
+        - PolicyName: S3HistoricalAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:ListBucket'
+                Resource: 
+                  - !Sub 'arn:${AWS::Partition}:s3:::${S3Bucket}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${S3Bucket}/*'
+        
+        # SNS Publishing for alerts
+        - PolicyName: SNSAlertsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'sns:Publish'
+                  - 'sns:GetTopicAttributes'
+                Resource: !Ref AlertTopic
+        
+        # CloudWatch Metrics
+        - PolicyName: CloudWatchMetrics
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'cloudwatch:PutMetricData'
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'cloudwatch:namespace': 'ShiftOpportunity/UnifiedProcessor'
+        
+        # Lambda Invocation for Self-Invocation and Target Lambda
+        - PolicyName: LambdaInvocation
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource: 
+                  - !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaFunctionName}'
+                  - !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:ShiftOpportunityServiceEvents-sns-to-kinesis'
+                  - !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:ShiftOpportunityServiceEvents-*'
+
+  # Unified Lambda Function
+  UnifiedLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${LambdaFunctionName}'
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt UnifiedLambdaExecutionRole.Arn
+      Timeout: 900  # 15 minutes (max timeout for large S3 replays)
+      MemorySize: 1024  # Increased for better performance
+      ReservedConcurrentExecutions: 50  # Prevent overwhelming downstream
+      Environment:
+        Variables:
+          # Core Configuration
+          LAMBDA_REGION: !Ref 'AWS::Region'
+          ENVIRONMENT: !Ref Environment
+          KINESIS_STREAM_NAME: !Ref KinesisStreamName
+          
+          # Unified DLQ Configuration  
+          UNIFIED_DLQ_URL: !Ref UnifiedDLQ
+          POISON_QUEUE_URL: !Ref PoisonQueue
+          ALERT_SNS_TOPIC_ARN: !Ref AlertTopic
+          
+          # S3 Configuration
+          S3_BUCKET: !Ref S3Bucket
+          S3_RAW_PREFIX: 'raw/'
+          
+          # Simplified Error Handling Settings
+          MAX_RETRY_ATTEMPTS: '3'
+          DLQ_BATCH_SIZE: '10'
+          ERROR_RATE_THRESHOLD: '5.0'
+          
+          # Processing Settings
+          MAX_MESSAGE_SIZE_KB: '256'
+          S3_RECORDS_CHUNK_SIZE: '500'
+          S3_TIMEOUT_BUFFER_MS: '120000'
+          
+          # S3 Historical Replay Settings
+          TARGET_LAMBDA_FUNCTION: !Sub '${LambdaFunctionName}'
+          BATCH_SIZE: '25'
+          MIN_TIME_FOR_FILE_MS: '30000'
+      
+      Code:
+        ZipFile: |
+          # Placeholder - replace with actual unified processor code
+          import json
+          def lambda_handler(event, context):
+              return {
+                  'statusCode': 200, 
+                  'body': json.dumps({
+                      'message': 'Unified processor placeholder',
+                      'event_type': type(event).__name__
+                  })
+              }
+      
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: 'ShiftOpportunity'
+        - Key: Purpose
+          Value: 'UnifiedProcessor'
+
+  # ================================================================================
+  # Event-Driven DLQ Processing (SQS Event Source Mapping)
+  # ================================================================================
+  
+  # SQS Event Source Mapping for automatic DLQ processing
+  DLQEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt UnifiedDLQ.Arn
+      FunctionName: !Ref UnifiedLambdaFunction
+      BatchSize: 10  # Process up to 10 DLQ messages at once
+      MaximumBatchingWindowInSeconds: 30  # Wait up to 30 seconds to batch messages
+      Enabled: true
+      FunctionResponseTypes:
+        - ReportBatchItemFailures  # Enable partial batch failure handling
+
+  # ================================================================================
+  # SNS Integration (Cross-Region Support)
+  # ================================================================================
+  
+  # Lambda Permission for SNS invocation
+  SNSLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref UnifiedLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref SNSTopicArn
+
+  # ================================================================================
+  # Alerting Infrastructure
+  # ================================================================================
+  
+  # SNS Topic for all alerts
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'ShiftOpportunity-Alerts-${Environment}'
+      DisplayName: 'ShiftOpportunity Unified Processor Alerts'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: 'ShiftOpportunity'
+        - Key: Purpose
+          Value: 'Alerts'
+
+  # Email subscription for alerts
+  AlertEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      TopicArn: !Ref AlertTopic
+      Endpoint: !Ref NotificationEmail
+
+  # ================================================================================
+  # CloudWatch Monitoring and Alarms
+  # ================================================================================
+  
+  # Lambda Error Rate Alarm
+  LambdaErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'ShiftOpportunity-HighErrorRate-${Environment}'
+      AlarmDescription: 'High error rate in unified Lambda function'
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300  # 5 minutes
+      EvaluationPeriods: 2
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref AlertTopic
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref UnifiedLambdaFunction
+      TreatMissingData: notBreaching
+
+  # DLQ Messages Alarm - triggers immediately
+  UnifiedDLQMessagesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'ShiftOpportunity-DLQMessages-${Environment}'
+      AlarmDescription: 'Messages detected in Unified DLQ'
+      MetricName: ApproximateNumberOfVisibleMessages
+      Namespace: AWS/SQS
+      Statistic: Maximum
+      Period: 60  # 1 minute for faster detection
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref AlertTopic
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt UnifiedDLQ.QueueName
+      TreatMissingData: notBreaching
+
+  # Poison Queue Messages Alarm - critical alert
+  PoisonQueueMessagesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'ShiftOpportunity-PoisonQueueMessages-${Environment}'
+      AlarmDescription: 'CRITICAL: Messages detected in Poison Queue'
+      MetricName: ApproximateNumberOfVisibleMessages
+      Namespace: AWS/SQS
+      Statistic: Maximum
+      Period: 60  # 1 minute
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref AlertTopic
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt PoisonQueue.QueueName
+      TreatMissingData: notBreaching
+
+  # Custom Metrics Alarms
+  ProcessingSuccessRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'ShiftOpportunity-LowSuccessRate-${Environment}'
+      AlarmDescription: 'Processing success rate below 95%'
+      MetricName: SNSSuccessRate
+      Namespace: ShiftOpportunity/UnifiedProcessor
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 95
+      ComparisonOperator: LessThanThreshold
+      AlarmActions:
+        - !Ref AlertTopic
+      TreatMissingData: notBreaching
+
+  # ================================================================================
+  # CloudWatch Dashboard
+  # ================================================================================
+  
+  UnifiedProcessorDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub 'ShiftOpportunity-UnifiedProcessor-${Environment}'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${UnifiedLambdaFunction}" ],
+                  [ ".", "Errors", ".", "." ],
+                  [ ".", "Duration", ".", "." ]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "Unified Lambda Metrics"
+              }
+            },
+            {
+              "type": "metric", 
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "ShiftOpportunity/UnifiedProcessor", "SNSSuccessRate" ],
+                  [ ".", "DLQSuccessRate" ],
+                  [ ".", "SNSRecordsReceived" ],
+                  [ ".", "DLQMessagesReceived" ]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "title": "Processing Success Rates"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/SQS", "ApproximateNumberOfVisibleMessages", "QueueName", "${UnifiedDLQ}" ],
+                  [ ".", ".", ".", "${PoisonQueue}" ]
+                ],
+                "period": 300,
+                "stat": "Maximum",
+                "region": "${AWS::Region}",
+                "title": "Queue Depths"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "ShiftOpportunity/UnifiedProcessor", "MessagesSentToDLQ" ],
+                  [ ".", "MessagesSentToPoison" ],
+                  [ ".", "AlertsSent" ]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "Error Handling Metrics"
+              }
+            }
+          ]
+        }
+
+  # ================================================================================
+  # CloudWatch Log Groups
+  # ================================================================================
+  
+  UnifiedLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${LambdaFunctionName}'
+      RetentionInDays: 30
+
+# ================================================================================
+# Stack Outputs
+# ================================================================================
+
+Outputs:
+  UnifiedLambdaFunctionArn:
+    Description: 'ARN of the unified Lambda function'
+    Value: !GetAtt UnifiedLambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-UnifiedLambda-ARN'
+
+  UnifiedDLQUrl:
+    Description: 'URL of the unified Dead Letter Queue'
+    Value: !Ref UnifiedDLQ
+    Export:
+      Name: !Sub '${AWS::StackName}-UnifiedDLQ-URL'
+
+  PoisonQueueUrl:
+    Description: 'URL of the Poison Queue'
+    Value: !Ref PoisonQueue
+    Export:
+      Name: !Sub '${AWS::StackName}-PoisonQueue-URL'
+
+  AlertTopicArn:
+    Description: 'ARN of the alert SNS topic'
+    Value: !Ref AlertTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-AlertTopic-ARN'
+
+  DashboardURL:
+    Description: 'URL to the CloudWatch Dashboard'
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${UnifiedProcessorDashboard}'
+
+  DLQEventSourceMappingArn:
+    Description: 'ARN of the DLQ Event Source Mapping (for event-driven processing)'
+    Value: !Ref DLQEventSourceMapping
+    Export:
+      Name: !Sub '${AWS::StackName}-DLQEventSourceMapping-ARN'
+
+  # Configuration Summary
+  ConfigurationSummary:
+    Description: 'Key configuration details'
+    Value: !Sub |
+      Unified DLQ: ${UnifiedDLQ}
+      Poison Queue: ${PoisonQueue}
+      Max Retry Attempts: 3
+      Event-Driven Processing: Enabled
+      Alert Email: ${NotificationEmail} 

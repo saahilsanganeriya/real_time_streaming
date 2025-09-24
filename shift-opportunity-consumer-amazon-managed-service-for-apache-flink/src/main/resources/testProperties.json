@@ -1,0 +1,33 @@
+[
+  {
+    "PropertyGroupId": "FlinkApplicationProperties",
+    "PropertyMap": {
+      
+      "_comment_InputStreamArn": "REQUIRED: ARN of the Kinesis Data Stream containing shift opportunity events",
+      "InputStreamArn": "arn:<partition>:kinesis:us-east-1:123456789012:stream/ShiftOpportunityServiceEvents",
+      
+      "_comment_OpenSearchEndpoint": "REQUIRED: Amazon OpenSearch Service cluster endpoint URL",
+      "OpenSearchEndpoint": "https://search-your-opensearch-domain.us-east-1.es.amazonaws.com:443",
+      
+      "_comment_Authentication": "OPTIONAL: Basic auth credentials (not recommended for production)",
+      "_comment_IAM_Preferred": "For production, omit username/password to use IAM authentication",
+      "OpenSearchUsername": "admin",
+      "OpenSearchPassword": "UPDATE_WITH_ACTUAL_PASSWORD",
+      
+      "_comment_S3Backup": "OPTIONAL: S3 configuration for backup storage and disaster recovery",
+      "S3BucketName": "your-shift-opportunity-logs-bucket",
+      "S3Prefix": "shift-opportunity-logs",
+      
+      "_comment_Region": "AWS region for IAM authentication (default: us-east-1)",
+      "Region": "us-east-1",
+      
+      "_comment_ProcessingMode": "conditional (safe, out-of-order protection) or fast (max speed)",
+      "ProcessingMode": "conditional",
+      
+      "_comment_IndexNames": "OpenSearch index names (configurable with sensible defaults)",
+      "OpenSearchCurrentStateIndex": "shift-opportunity-current",
+      "OpenSearchEventsLogIndex": "shift-opportunity-events-log", 
+      "OpenSearchAssociatesIndex": "shift-opportunity-associates"
+    }
+  }
+]

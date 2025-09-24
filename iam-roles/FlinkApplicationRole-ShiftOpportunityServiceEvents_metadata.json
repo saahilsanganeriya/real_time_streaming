@@ -1,0 +1,27 @@
+{
+    "Role": {
+        "Path": "/",
+        "RoleName": "FlinkApplicationRole-ShiftOpportunityServiceEvents",
+        "RoleId": "AROA1234567890EXAMPLE",
+        "Arn": "arn:<partition>:iam::123456789012:role/FlinkApplicationRole-ShiftOpportunityServiceEvents",
+        "CreateDate": "2025-07-30T19:19:31+00:00",
+        "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {
+                        "Service": "kinesisanalytics.amazonaws.com"
+                    },
+                    "Action": "sts:AssumeRole"
+                }
+            ]
+        },
+        "Description": "Allows Kinesis Analytics to call AWS services on your behalf.",
+        "MaxSessionDuration": 3600,
+        "RoleLastUsed": {
+            "LastUsedDate": "2025-07-30T20:36:47+00:00",
+            "Region": "us-east-1"
+        }
+    }
+}
