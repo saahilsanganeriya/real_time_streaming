@@ -1,0 +1,2 @@
+# Synthetic sample key in the data simulator (base64 of all-zero JSON ids), not a credential.
+735bf496e92ae32d67c37fe9e4211f2b7b396915:lambda-functions/ShiftOppSimulator-stack-DataSimulator.py:generic-api-key:410
