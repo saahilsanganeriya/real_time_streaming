@@ -93,6 +93,7 @@ building the prototype, not after.
 | [`cloudformation-templates/`](./cloudformation-templates/) | stacks for the processor, the cross-region subscription and its dead-letter queue, and the simulator |
 | [`iam-roles/`](./iam-roles/) | an export of the Flink application role |
 | [`opensearch dashboards/`](./opensearch%20dashboards/) | saved dashboards for the business view and system health |
+| [`docs/`](./docs/) | the [design document](./docs/design.md) I wrote for the project, and its [challenges write-up](./docs/challenges.md) |
 
 ## Running it
 
